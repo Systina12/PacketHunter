@@ -18,6 +18,24 @@ class HttpFeatures:
     uri_count: Dict[str, int]
     # (src_ip, scanner) -> hit count
     ua_hits: Dict[Tuple[str, str], int]
+    # src_ip -> captured requests
+    requests: Dict[str, List["HttpRequest"]]
+
+
+@dataclass
+class HttpRequest:
+    """Structured record of a single HTTP request."""
+
+    src_ip: str
+    dst_ip: str
+    method: str
+    host: str
+    uri: str
+    user_agent: str
+
+    def url(self) -> str:
+        host_or_ip = self.host or self.dst_ip
+        return f"http://{host_or_ip}{self.uri}" if host_or_ip else self.uri
 
 
 def extract_http_features(pcap: str) -> HttpFeatures:
@@ -30,22 +48,33 @@ def extract_http_features(pcap: str) -> HttpFeatures:
     user_agents: Dict[str, List[str]] = defaultdict(list)
     uri_count: Dict[str, int] = defaultdict(int)
     ua_hits: Dict[Tuple[str, str], int] = defaultdict(int)
+    requests: Dict[str, List[HttpRequest]] = defaultdict(list)
 
     for row in run_tshark(
         pcap,
         "http.request",
-        ["ip.src", "http.user_agent", "http.request.uri"],
+        ["ip.src", "ip.dst", "http.request.method", "http.user_agent", "http.request.uri", "http.host"],
     ):
         # 容错：字段可能缺失
-        parts = row.fields + ["", "", ""]
-        src, ua, uri = parts[0], parts[1], parts[2]
+        parts = row.fields + ["", "", "", "", "", ""]
+        src, dst, method, ua, uri, host = parts[:6]
 
         if not src:
             continue
 
         uri_count[src] += 1
 
-        ua_l = (ua or "").lower()
+        request = HttpRequest(
+            src_ip=src,
+            dst_ip=dst or "",
+            method=(method or "GET").upper(),
+            host=host or "",
+            uri=uri or "",
+            user_agent=ua or "",
+        )
+        requests[src].append(request)
+
+        ua_l = request.user_agent.lower()
         if ua_l:
             user_agents[src].append(ua_l)
 
@@ -57,7 +86,7 @@ def extract_http_features(pcap: str) -> HttpFeatures:
                         Hit(
                             scanner=scanner,
                             src_ip=src,
-                            detail=f"HTTP UA hit: {ua}  uri={uri}",
+                            detail=f"HTTP UA hit: {request.user_agent}  uri={request.uri}",
                             severity="bad",
                         )
                     )
@@ -66,4 +95,5 @@ def extract_http_features(pcap: str) -> HttpFeatures:
         user_agents=dict(user_agents),
         uri_count=dict(uri_count),
         ua_hits=dict(ua_hits),
+        requests=dict(requests),
     )

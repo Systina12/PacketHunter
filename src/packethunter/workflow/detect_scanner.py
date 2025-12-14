@@ -4,10 +4,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from packethunter.analyzers.scanner import detect_scanners, emit_result_live
 from packethunter.ui.console import headline, info, ok, warn
-from packethunter.features.syn_scan import extract_syn_scan_features, find_scan_candidates
-from packethunter.features.http_probe import extract_http_features
-from packethunter.analyzers.scanner import score_scanner, emit_result_live
 
 
 def main(pcap_path: str) -> int:
@@ -19,22 +17,17 @@ def main(pcap_path: str) -> int:
         warn(f"PCAP not found: {pcap}")
         return 2
 
-    syn_features = extract_syn_scan_features(str(pcap))
-    http_features = extract_http_features(str(pcap))
+    detection = detect_scanners(str(pcap), emit=False)
 
-    candidates = find_scan_candidates(syn_features)
-
-    if not candidates:
-        warn("No scan candidates met thresholds.")
+    if not detection.results:
         ok("Analysis finished")
         return 0
 
     headline("Candidates & Classification")
-    for src in candidates:
-        result = score_scanner(src, syn_features, http_features)
+    for result in detection.results:
         emit_result_live(result)
         for ev in result.evidence:
-            info(f"{src}: {ev}")
+            info(f"{result.src_ip}: {ev}")
 
     ok("Analysis finished")
     return 0
