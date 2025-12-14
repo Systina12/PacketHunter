@@ -4,10 +4,21 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from packethunter.ui.console import headline, info, ok, warn
-from packethunter.features.syn_scan import extract_syn_scan_features, find_scan_candidates
+from packethunter.analyzers.scanner import detect_scanners
 from packethunter.features.http_probe import extract_http_features
-from packethunter.analyzers.scanner import score_scanner, emit_result_live
+from packethunter.features.syn_scan import extract_syn_scan_features
+from packethunter.ui.console import headline, info, ok, warn
+
+
+def _print_summary(results) -> None:
+    if not results:
+        return
+
+    headline("扫描总结")
+    for r in results:
+        ok(f"{r.src_ip} 使用 {r.scanner} (score={r.score})")
+        for ev in r.evidence:
+            info(f"{r.src_ip}: {ev}")
 
 
 def main(pcap_path: str) -> int:
@@ -22,20 +33,13 @@ def main(pcap_path: str) -> int:
     syn_features = extract_syn_scan_features(str(pcap))
     http_features = extract_http_features(str(pcap))
 
-    candidates = find_scan_candidates(syn_features)
-
-    if not candidates:
-        warn("No scan candidates met thresholds.")
+    results = detect_scanners(syn_features, http_features)
+    if not results:
+        warn("No scanner candidates met thresholds or signatures.")
         ok("Analysis finished")
         return 0
 
-    headline("Candidates & Classification")
-    for src in candidates:
-        result = score_scanner(src, syn_features, http_features)
-        emit_result_live(result)
-        for ev in result.evidence:
-            info(f"{src}: {ev}")
-
+    _print_summary(results)
     ok("Analysis finished")
     return 0
 
