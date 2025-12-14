@@ -2,68 +2,128 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
 from packethunter.data.signature import UA_SIGNATURES
 from packethunter.tshark2python.tshark_runner import run_tshark
-from packethunter.ui.console import Hit, info, print_hit
+from packethunter.ui.console import Hit, info, print_hit, warn
+
+
+@dataclass(frozen=True)
+class HttpRequest:
+    src_ip: str
+    dst_ip: str
+    method: str
+    host: str
+    uri: str
+    user_agent: str
+    stream: str
+
+    @property
+    def url(self) -> str:
+        host = self.host or self.dst_ip or ""
+        return f"http://{host}{self.uri}"
+
+
+@dataclass(frozen=True)
+class UserAgentHit:
+    src_ip: str
+    scanner: str
+    user_agent: str
+    uri: str
 
 
 @dataclass
 class HttpFeatures:
-    # src_ip -> list of ua strings
-    user_agents: Dict[str, List[str]]
-    # src_ip -> uri count
-    uri_count: Dict[str, int]
-    # (src_ip, scanner) -> hit count
-    ua_hits: Dict[Tuple[str, str], int]
+    requests: List[HttpRequest] = field(default_factory=list)
+    ua_hits: List[UserAgentHit] = field(default_factory=list)
+    request_count: Dict[str, int] = field(default_factory=dict)
+    hit_count: Dict[Tuple[str, str], int] = field(default_factory=dict)
+
+    def sources(self) -> List[str]:
+        all_ips = set(self.request_count.keys()) | {hit.src_ip for hit in self.ua_hits}
+        return sorted(all_ips)
+
+
+def _record_hit(hit: UserAgentHit) -> None:
+    print_hit(
+        Hit(
+            scanner=hit.scanner,
+            src_ip=hit.src_ip,
+            detail=f"HTTP UA hit: {hit.user_agent} uri={hit.uri}",
+            severity="bad",
+        )
+    )
 
 
 def extract_http_features(pcap: str) -> HttpFeatures:
     """
-    提取 HTTP 请求的 UA/URI，并且发现命中时即时输出（红色）
+    Stream HTTP requests to capture user-agents and URIs.
+
+    The extractor keeps every request for later workflows while emitting
+    real-time hits for any user-agent that matches known scanner signatures.
     """
 
-    info("Starting HTTP UA inspection (streaming)")
+    info("Starting HTTP inspection (streaming)")
 
-    user_agents: Dict[str, List[str]] = defaultdict(list)
-    uri_count: Dict[str, int] = defaultdict(int)
-    ua_hits: Dict[Tuple[str, str], int] = defaultdict(int)
+    requests: List[HttpRequest] = []
+    ua_hits: List[UserAgentHit] = []
+    request_count: Dict[str, int] = defaultdict(int)
+    hit_count: Dict[Tuple[str, str], int] = defaultdict(int)
 
-    for row in run_tshark(
-        pcap,
-        "http.request",
-        ["ip.src", "http.user_agent", "http.request.uri"],
-    ):
-        # 容错：字段可能缺失
-        parts = row.fields + ["", "", ""]
-        src, ua, uri = parts[0], parts[1], parts[2]
+    fields = [
+        "ip.src",
+        "ip.dst",
+        "http.request.method",
+        "http.host",
+        "http.request.uri",
+        "http.user_agent",
+        "tcp.stream",
+    ]
+
+    for row in run_tshark(pcap, "http.request", fields):
+        parts = row.fields + [""] * (len(fields) - len(row.fields))
+        src, dst, method, host, uri, ua, stream = parts[:7]
 
         if not src:
             continue
 
-        uri_count[src] += 1
+        method = method or "GET"
+        request = HttpRequest(
+            src_ip=src,
+            dst_ip=dst or "",
+            method=method,
+            host=host or "",
+            uri=uri or "",
+            user_agent=ua or "",
+            stream=stream or "",
+        )
+        requests.append(request)
+        request_count[src] += 1
 
-        ua_l = (ua or "").lower()
-        if ua_l:
-            user_agents[src].append(ua_l)
+        ua_l = request.user_agent.casefold()
+        if not ua_l:
+            continue
 
-            for scanner, sigs in UA_SIGNATURES.items():
-                if any(sig in ua_l for sig in sigs):
-                    ua_hits[(src, scanner)] += 1
+        for scanner, sigs in UA_SIGNATURES.items():
+            if any(sig.casefold() in ua_l for sig in sigs):
+                hit = UserAgentHit(
+                    src_ip=src,
+                    scanner=scanner,
+                    user_agent=request.user_agent,
+                    uri=request.uri,
+                )
+                ua_hits.append(hit)
+                hit_count[(src, scanner)] += 1
+                _record_hit(hit)
 
-                    print_hit(
-                        Hit(
-                            scanner=scanner,
-                            src_ip=src,
-                            detail=f"HTTP UA hit: {ua}  uri={uri}",
-                            severity="bad",
-                        )
-                    )
+    if not requests:
+        warn("No HTTP requests observed in capture")
 
     return HttpFeatures(
-        user_agents=dict(user_agents),
-        uri_count=dict(uri_count),
-        ua_hits=dict(ua_hits),
+        requests=requests,
+        ua_hits=ua_hits,
+        request_count=dict(request_count),
+        hit_count=dict(hit_count),
     )
