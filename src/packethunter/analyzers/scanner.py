@@ -24,7 +24,7 @@ def _score_user_agents(src_ip: str, ua_hits: List[UserAgentHit]) -> Dict[str, in
     for hit in ua_hits:
         if hit.src_ip != src_ip:
             continue
-        scores[hit.scanner] += 15
+        scores[hit.scanner] += 60
     return scores
 
 
@@ -46,10 +46,10 @@ def _score_syn_behavior(src_ip: str, syn_features: SynScanFeatures) -> tuple[Dic
         and len(stats.ports) >= SCAN_THRESHOLDS["min_ports"]
     )
     if has_threshold and ratio > 0.9:
-        scores["masscan"] += 8
+        scores["masscan"] += 50
         evidence.append("High SYN/port ratio -> masscan-likely")
     elif stats.syn_count:
-        scores["nmap"] += 5
+        scores["nmap"] += 30
         evidence.append("Mixed SYN footprint -> nmap-likely")
 
     return scores, evidence

@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Deque, Dict, List
+from typing import Deque, Dict, List, Optional
 
 from rich.table import Table
 
@@ -12,7 +12,10 @@ from packethunter.analyzers.scanner import detect_scanners
 from packethunter.features.http_probe import extract_http_features
 from packethunter.features.syn_scan import extract_syn_scan_features
 from packethunter.tshark2python.tshark_runner import run_tshark
-from packethunter.ui.console import console, headline, info, warn
+from packethunter.ui.console import console, headline, info, set_log_file, warn
+
+
+SCORE_THRESHOLD = 100
 
 
 @dataclass
@@ -112,6 +115,7 @@ def _render_exchanges(scanner_ip: str, scanner_name: str, exchanges: List[HttpEx
         return
 
     table = Table(title="HTTP Responses", show_lines=True)
+    table.add_column("Scanner IP", justify="right")
     table.add_column("Status", justify="right")
     table.add_column("URL", overflow="fold")
     table.add_column("User-Agent", overflow="fold")
@@ -119,21 +123,26 @@ def _render_exchanges(scanner_ip: str, scanner_name: str, exchanges: List[HttpEx
 
     for ex in exchanges:
         if ex.status != "200":
-            info(f"{ex.status} {ex.url}")
-            table.add_row(ex.status, ex.url, ex.user_agent, "")
+            info(f"{scanner_ip} {ex.status} {ex.url}")
+            table.add_row(scanner_ip, ex.status, ex.url, ex.user_agent, "")
             continue
 
-        info(f"{ex.status} {ex.url} -> full response captured")
         body = ex.body or "(empty body)"
-        table.add_row(ex.status, ex.url, ex.user_agent, body)
+        info(f"{scanner_ip} {ex.status} {ex.url} -> response length={len(body)}")
+        console.print(body)
+        body = ex.body or "(empty body)"
+        table.add_row(scanner_ip, ex.status, ex.url, ex.user_agent, body)
 
     console.print(table)
 
 
-def main(pcap_path: str) -> int:
+def main(pcap_path: str, output_file: Optional[str] = None) -> int:
     pcap = Path(pcap_path)
     headline("PacketHunter - Scan Result")
     info(f"Analyzing pcap: {pcap}")
+
+    if output_file:
+        set_log_file(output_file)
 
     if not pcap.exists():
         warn(f"PCAP not found: {pcap}")
@@ -147,7 +156,17 @@ def main(pcap_path: str) -> int:
         warn("No scanners detected; nothing to reconstruct.")
         return 0
 
-    for scanner in scanners:
+    eligible = [s for s in scanners if s.score >= SCORE_THRESHOLD]
+    if not eligible:
+        warn(
+            f"No scanner met score threshold {SCORE_THRESHOLD}; skip reconstruction."
+        )
+        return 0
+
+    for scanner in eligible:
+        info(
+            f"Reconstructing HTTP for {scanner.src_ip} using {scanner.scanner} (score={scanner.score})"
+        )
         exchanges = _reconstruct_http(str(pcap), scanner.src_ip)
         _render_exchanges(scanner.src_ip, scanner.scanner, exchanges)
 
@@ -159,5 +178,11 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("pcap", help="Path to pcap/pcapng")
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="Optional path to tee console output into a file (UTF-8)",
+        default=None,
+    )
     args = parser.parse_args()
-    raise SystemExit(main(args.pcap))
+    raise SystemExit(main(args.pcap, args.output))
